@@ -1,0 +1,32 @@
+# macOS
+.DS_Store
+
+# Xcode
+build/
+DerivedData/
+*.xcuserstate
+*.xcuserdatad
+xcuserdata/
+*.moved-aside
+*.pbxuser
+!default.pbxuser
+*.perspectivev3
+!default.perspectivev3
+*.hmap
+*.ipa
+*.dSYM
+*.dSYM.zip
+*.xcresult/
+
+# Swift Package Manager
+.build/
+.swiftpm/
+Packages/
+
+# Credentials never belong in this repo — they live in the device Keychain.
+# These patterns are a backstop, not the mechanism.
+.env
+.env.*
+*.pem
+secrets.json
+credentials.json
