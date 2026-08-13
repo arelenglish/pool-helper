@@ -96,6 +96,7 @@ struct ContentView: View {
         HeatCard(
             poolTemp: store.state.poolTemp,
             targetTemperature: store.targetTemperature,
+            presets: store.heatPresets,
             isHeaterOn: store.state.isHeaterOn,
             isPumpOn: store.state.isPumpOn,
             deadline: store.heatDeadline,
@@ -107,7 +108,13 @@ struct ContentView: View {
     }
 
     private var jetsCard: some View {
-        JetsCard(isOn: store.state.areJetsOn, setOn: store.setJets)
+        JetsCard(
+            isOn: store.state.areJetsOn,
+            presets: store.jetsPresets,
+            deadline: store.jetsDeadline,
+            startJets: store.startJets,
+            stopJets: store.stopJets
+        )
             .frame(maxWidth: .infinity)
     }
 

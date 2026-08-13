@@ -3,6 +3,7 @@ import SwiftUI
 struct HeatCard: View {
     let poolTemp: Int?
     let targetTemperature: Int
+    let presets: [TimeInterval]
     let isHeaterOn: Bool
     let isPumpOn: Bool
     let deadline: Date?
@@ -56,25 +57,22 @@ struct HeatCard: View {
             Spacer(minLength: 4).frame(maxHeight: 40)
 
             VStack(spacing: m.rowGap) {
-                ForEach(HeatSchedule.presets, id: \.self) { duration in
-                    DurationButton(duration: duration, enabled: wouldHeat, padding: m.buttonPadding) {
+                ForEach(presets, id: \.self) { duration in
+                    DurationButton(
+                        duration: duration,
+                        systemImage: "flame.fill",
+                        tint: PoolTheme.flame,
+                        enabled: wouldHeat,
+                        padding: m.buttonPadding
+                    ) {
                         startHeating(duration)
                     }
                 }
 
-                Button(action: stopHeating) {
-                    Text("Stop heating")
-                        .font(PoolFont.button)
-                        .foregroundStyle(isHeaterOn ? .white : .white.opacity(0.3))
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, m.buttonPadding)
-                        .background(
-                            RoundedRectangle(cornerRadius: 20)
-                                .fill(Color.white.opacity(isHeaterOn ? 0.16 : 0.05))
-                        )
-                }
-                .buttonStyle(.plain)
-                .disabled(!isHeaterOn)
+                StopButton(
+                    title: "Stop heating", enabled: isHeaterOn,
+                    padding: m.buttonPadding, action: stopHeating
+                )
             }
 
             status
@@ -198,53 +196,13 @@ private struct StepButton: View {
     }
 }
 
-private struct DurationButton: View {
-    let duration: TimeInterval
-    let enabled: Bool
-    let padding: CGFloat
-    let action: () -> Void
-
-    private var label: String {
-        let hours = Int(duration / 3600)
-        return hours == 1 ? "1 hour" : "\(hours) hours"
-    }
-
-    var body: some View {
-        Button(action: action) {
-            HStack(spacing: 12) {
-                Image(systemName: "flame.fill")
-                    .font(.system(size: 18, weight: .semibold))
-                Text(label)
-                Spacer(minLength: 0)
-            }
-            .font(PoolFont.button)
-            .foregroundStyle(enabled ? PoolTheme.flame : .white.opacity(0.22))
-            .padding(.horizontal, 20)
-            .padding(.vertical, padding)
-            .frame(maxWidth: .infinity)
-            .background(
-                RoundedRectangle(cornerRadius: 20)
-                    .fill(enabled ? PoolTheme.flame.opacity(0.16) : Color.white.opacity(0.04))
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: 20)
-                    .strokeBorder(
-                        enabled ? PoolTheme.flame.opacity(0.38) : .white.opacity(0.06),
-                        lineWidth: 1
-                    )
-            )
-        }
-        .buttonStyle(.plain)
-        .disabled(!enabled)
-        .accessibilityLabel("Heat for \(label)")
-    }
-}
 
 #Preview(traits: .landscapeLeft) {
     ZStack {
         PoolBackground()
         HeatCard(
-            poolTemp: 95, targetTemperature: 104, isHeaterOn: true, isPumpOn: true,
+            poolTemp: 95, targetTemperature: 104,
+            presets: [3600, 7200, 14400], isHeaterOn: true, isPumpOn: true,
             deadline: Date().addingTimeInterval(7200),
             adjustTarget: { _ in }, startHeating: { _ in }, stopHeating: {}
         )

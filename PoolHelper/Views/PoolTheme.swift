@@ -120,6 +120,80 @@ struct Card<Content: View>: View {
     }
 }
 
+/// "15 minutes", "1 hour", "4 hours" — the jets run in minutes and the heater in hours, so
+/// one formatter covers both rather than each card inventing its own.
+nonisolated enum DurationLabel {
+    static func text(for duration: TimeInterval) -> String {
+        let minutes = Int(duration.rounded() / 60)
+        if minutes < 60 { return "\(minutes) minutes" }
+        let hours = minutes / 60
+        return hours == 1 ? "1 hour" : "\(hours) hours"
+    }
+}
+
+/// Starts a timed run. Shared by Heat and Jets so the two timers look and behave identically.
+struct DurationButton: View {
+    let duration: TimeInterval
+    let systemImage: String
+    let tint: Color
+    let enabled: Bool
+    var padding: CGFloat = 15
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 12) {
+                Image(systemName: systemImage)
+                    .font(.system(size: 18, weight: .semibold))
+                Text(DurationLabel.text(for: duration))
+                Spacer(minLength: 0)
+            }
+            .font(PoolFont.button)
+            .foregroundStyle(enabled ? tint : .white.opacity(0.22))
+            .padding(.horizontal, 20)
+            .padding(.vertical, padding)
+            .frame(maxWidth: .infinity)
+            .background(
+                RoundedRectangle(cornerRadius: 20)
+                    .fill(enabled ? tint.opacity(0.16) : Color.white.opacity(0.04))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 20)
+                    .strokeBorder(
+                        enabled ? tint.opacity(0.38) : .white.opacity(0.06), lineWidth: 1
+                    )
+            )
+        }
+        .buttonStyle(.plain)
+        .disabled(!enabled)
+        .accessibilityLabel("Run for \(DurationLabel.text(for: duration))")
+    }
+}
+
+/// The matching "stop early" control.
+struct StopButton: View {
+    let title: String
+    let enabled: Bool
+    var padding: CGFloat = 14
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            Text(title)
+                .font(PoolFont.button)
+                .foregroundStyle(enabled ? .white : .white.opacity(0.3))
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, padding)
+                .background(
+                    RoundedRectangle(cornerRadius: 20)
+                        .fill(Color.white.opacity(enabled ? 0.16 : 0.05))
+                )
+        }
+        .buttonStyle(.plain)
+        .disabled(!enabled)
+    }
+}
+
 /// The primary on/off control. A wide pill rather than a tall block — it reads as one big
 /// target and leaves the vertical room the cards actually need.
 struct BigToggle: View {

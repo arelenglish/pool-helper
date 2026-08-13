@@ -17,6 +17,8 @@ final class PoolStore {
     private(set) var state: PoolState = .placeholder
     private(set) var connection: Connection = .connecting
     private(set) var heatDeadline: Date?
+    private(set) var jetsDeadline: Date?
+    private(set) var lightsDeadline: Date?
     /// Transient message shown when an action fails and gets rolled back.
     private(set) var banner: String?
 
@@ -29,7 +31,10 @@ final class PoolStore {
     private var confirmed: PoolState = .placeholder
 
     private let client: IAqualinkClient
-    private let schedule: HeatSchedule
+    private let schedule: ShutoffSchedule
+    private let jetsSchedule: ShutoffSchedule
+    private let lightsSchedule: ShutoffSchedule
+    private let solar: SolarClock
     private let credentials: CredentialProvider
     private var session: Session?
     private var pollTask: Task<Void, Never>?
@@ -44,21 +49,34 @@ final class PoolStore {
 
     init(
         client: IAqualinkClient = LiveIAqualinkClient(),
-        schedule: HeatSchedule = HeatSchedule(),
+        schedule: ShutoffSchedule = .heater(),
+        jetsSchedule: ShutoffSchedule = .jets(),
+        lightsSchedule: ShutoffSchedule = .lights(),
+        solar: SolarClock = SolarClock(coordinate: PoolLocationStore.load()),
         credentials: CredentialProvider = .keychain,
         pollInterval: Duration = .seconds(15),
         setPointDebounce: Duration = .milliseconds(1200)
     ) {
         self.client = client
         self.schedule = schedule
+        self.jetsSchedule = jetsSchedule
+        self.lightsSchedule = lightsSchedule
+        self.solar = solar
         self.credentials = credentials
         self.pollInterval = pollInterval
         self.setPointDebounce = setPointDebounce
         self.heatDeadline = schedule.deadline
+        self.jetsDeadline = jetsSchedule.deadline
+        self.lightsDeadline = lightsSchedule.deadline
     }
 
     /// Waits for any queued write (and its follow-up refresh) to finish. Tests only.
     func settle() async { _ = await writeChain.value }
+
+    var heatPresets: [TimeInterval] { schedule.presets }
+    var jetsPresets: [TimeInterval] { jetsSchedule.presets }
+    /// For the owner-facing copy on the setup screen.
+    var heatMaxHours: Int { Int((schedule.maxDuration ?? 0) / 3600) }
 
     // MARK: - Lifecycle
 
@@ -67,7 +85,7 @@ final class PoolStore {
         pollTask = Task { [weak self] in
             while !Task.isCancelled {
                 await self?.refresh()
-                await self?.enforceHeatDeadline()
+                await self?.enforceDeadlines()
                 try? await Task.sleep(for: self?.pollInterval ?? .seconds(15))
             }
         }
@@ -96,6 +114,9 @@ final class PoolStore {
             state = fresh
             // Don't overwrite a number the guest is actively adjusting.
             if setPointTask == nil { targetTemperature = fresh.poolSetPoint }
+            // Sync here rather than in the write's completion hook: hooks run before the
+            // follow-up refresh, so they'd be deciding against state we already know is stale.
+            syncLightsDawn()
             connection = .online
         } catch PoolError.noCredentials {
             connection = .needsSetup
@@ -108,25 +129,64 @@ final class PoolStore {
     // MARK: - Guest actions
 
     func setLight(on: Bool) {
-        apply({ $0.isLightOn = on }, action: { [client] session, confirmed in
-            guard confirmed.isLightOn != on else { return }
-            try await client.toggleAux(.light, session: session)
-        }, failureMessage: "Couldn't reach the light.")
+        apply(
+            { $0.isLightOn = on },
+            action: { [client] session, confirmed in
+                guard confirmed.isLightOn != on else { return }
+                try await client.toggleAux(.light, session: session)
+            },
+            failureMessage: "Couldn't reach the light."
+        )
     }
 
     func setLightColor(_ color: LightColor) {
-        apply({ $0.lightColorIndex = color.id; $0.isLightOn = true }, action: { [client] session, _ in
-            // set_light is an assignment, not a toggle, and turns the light on implicitly,
-            // so it needs no reconciliation.
-            try await client.setLightColor(index: color.id, session: session)
-        }, failureMessage: "Couldn't change the color.")
+        apply(
+            { $0.lightColorIndex = color.id; $0.isLightOn = true },
+            action: { [client] session, _ in
+                // set_light is an assignment, not a toggle, and turns the light on implicitly,
+                // so it needs no reconciliation.
+                try await client.setLightColor(index: color.id, session: session)
+            },
+            failureMessage: "Couldn't change the color."
+        )
     }
 
-    func setJets(on: Bool) {
-        apply({ $0.areJetsOn = on }, action: { [client] session, confirmed in
-            guard confirmed.areJetsOn != on else { return }
-            try await client.toggleAux(.jets, session: session)
-        }, failureMessage: "Couldn't reach the jets.")
+    /// Runs the jets for a fixed stretch, then shuts them off — the same arrangement as the
+    /// heater, and for the same reason: the API has no duration, so the app owns it.
+    func startJets(for duration: TimeInterval) {
+        // Armed before the write for the same reason as the heater: a spare deadline for a
+        // pump that never started is harmless, a running pump with no deadline is not.
+        jetsDeadline = jetsSchedule.arm(for: duration)
+        apply(
+            { $0.areJetsOn = true },
+            action: { [client] session, confirmed in
+                guard !confirmed.areJetsOn else { return }
+                try await client.toggleAux(.jets, session: session)
+            },
+            failureMessage: "Couldn't start the jets.",
+            onFailure: { [weak self, jetsSchedule] in
+                jetsSchedule.disarm()
+                self?.jetsDeadline = nil
+            }
+        )
+    }
+
+    func stopJets() {
+        apply(
+            { $0.areJetsOn = false },
+            action: { [client] session, confirmed in
+                guard confirmed.areJetsOn else { return }
+                try await client.toggleAux(.jets, session: session)
+            },
+            failureMessage: "Couldn't stop the jets.",
+            // Disarm only once the jets are confirmed off, so a failed stop still has a
+            // deadline left to retry against.
+            onSuccess: { [weak self, jetsSchedule] in
+                jetsSchedule.disarm()
+                self?.jetsDeadline = nil
+            },
+            onFailure: { [weak self, jetsSchedule] in self?.jetsDeadline = jetsSchedule.deadline }
+        )
     }
 
     /// Moves the dialed-in temperature. The number changes instantly and the controller is
@@ -156,8 +216,8 @@ final class PoolStore {
             failureMessage: "Couldn't change the temperature.",
             onFailure: { [weak self] in
                 // Snap the dial back to what the controller actually has.
-                if let self { self.targetTemperature = self.confirmed.poolSetPoint }
-                return self?.heatDeadline
+                guard let self else { return }
+                self.targetTemperature = self.confirmed.poolSetPoint
             }
         )
     }
@@ -183,7 +243,10 @@ final class PoolStore {
                 try await client.togglePoolHeater(session: session)
             },
             failureMessage: "Couldn't start the heater.",
-            onFailure: { [schedule] in schedule.disarm(); return nil }
+            onFailure: { [weak self, schedule] in
+                schedule.disarm()
+                self?.heatDeadline = nil
+            }
         )
     }
 
@@ -197,18 +260,42 @@ final class PoolStore {
             failureMessage: "Couldn't stop the heater.",
             // Disarm only once the heater is actually off. Disarming up front would mean a
             // failed stop leaves the heater running with nothing left to switch it off.
-            onSuccess: { [schedule] in schedule.disarm(); return nil },
-            onFailure: { [schedule] in schedule.deadline }
+            onSuccess: { [weak self, schedule] in
+                schedule.disarm()
+                self?.heatDeadline = nil
+            },
+            onFailure: { [weak self, schedule] in self?.heatDeadline = schedule.deadline }
         )
     }
 
-    // MARK: - Heat deadline
+    // MARK: - Automatic shutoffs
 
-    /// Called on every poll tick. Checking the clock here rather than scheduling a timer
-    /// means a missed or failed shutoff is retried automatically on the next tick, and a
-    /// deadline that elapsed while the app was dead fires on the first tick after launch.
-    func enforceHeatDeadline() async {
-        guard schedule.hasExpired() else {
+    /// Called on every poll tick. Checking the clock here rather than scheduling timers means
+    /// a missed or failed shutoff is retried automatically on the next tick, and a deadline
+    /// that elapsed while the app was dead fires on the first tick after launch.
+    func enforceDeadlines(now: Date = Date()) async {
+        syncLightsDawn(now: now)
+        await enforceHeater(now: now)
+        await enforceJets(now: now)
+        await enforceLights(now: now)
+    }
+
+    /// Keeps the lights' dawn deadline in step with reality. Armed whenever the lights are
+    /// seen on without one — which covers being switched on from the official app, or the
+    /// iPad restarting mid-evening — and cleared when they go off.
+    private func syncLightsDawn(now: Date = Date()) {
+        if confirmed.isLightOn || state.isLightOn {
+            if lightsSchedule.deadline == nil {
+                lightsDeadline = lightsSchedule.arm(until: solar.nextDawn(after: now))
+            }
+        } else if lightsSchedule.deadline != nil {
+            lightsSchedule.disarm()
+            lightsDeadline = nil
+        }
+    }
+
+    private func enforceHeater(now: Date) async {
+        guard schedule.hasExpired(now: now) else {
             heatDeadline = schedule.deadline
             return
         }
@@ -228,6 +315,48 @@ final class PoolStore {
         confirmed.isHeaterOn = false
     }
 
+    private func enforceJets(now: Date) async {
+        guard jetsSchedule.hasExpired(now: now) else {
+            jetsDeadline = jetsSchedule.deadline
+            return
+        }
+        guard let session = try? await activeSession() else { return }
+
+        if confirmed.areJetsOn {
+            do {
+                try await client.toggleAux(.jets, session: session)
+            } catch {
+                return
+            }
+        }
+        jetsSchedule.disarm()
+        jetsDeadline = nil
+        state.areJetsOn = false
+        confirmed.areJetsOn = false
+    }
+
+    /// Lights go off at dawn rather than after a duration — nobody sets a timer for "until
+    /// it's light out", and a light left on overnight is the one that actually gets forgotten.
+    private func enforceLights(now: Date) async {
+        guard lightsSchedule.hasExpired(now: now) else {
+            lightsDeadline = lightsSchedule.deadline
+            return
+        }
+        guard let session = try? await activeSession() else { return }
+
+        if confirmed.isLightOn {
+            do {
+                try await client.toggleAux(.light, session: session)
+            } catch {
+                return
+            }
+        }
+        lightsSchedule.disarm()
+        lightsDeadline = nil
+        state.isLightOn = false
+        confirmed.isLightOn = false
+    }
+
     // MARK: - Setup
 
     func signIn(email: String, password: String) async throws {
@@ -240,8 +369,12 @@ final class PoolStore {
     func signOut() {
         credentials.clear()
         schedule.disarm()
+        jetsSchedule.disarm()
+        lightsSchedule.disarm()
         session = nil
         heatDeadline = nil
+        jetsDeadline = nil
+        lightsDeadline = nil
         connection = .needsSetup
     }
 
@@ -269,10 +402,10 @@ final class PoolStore {
         _ optimistic: (inout PoolState) -> Void,
         action: @escaping @Sendable (Session, PoolState) async throws -> Void,
         failureMessage: String,
-        // Main-actor isolated, unlike `action`: these run after the write settles and read
-        // back store state, so they must not hop off the actor.
-        onSuccess: (() -> Date?)? = nil,
-        onFailure: (() -> Date?)? = nil
+        // Main-actor isolated, unlike `action`: these run after the write settles and touch
+        // store state, so they must not hop off the actor.
+        onSuccess: (() -> Void)? = nil,
+        onFailure: (() -> Void)? = nil
     ) {
         let rollback = state
         optimistic(&state)
@@ -290,13 +423,13 @@ final class PoolStore {
                     let renewed = try await self.signInFromKeychain()
                     try await action(renewed, self.confirmed)
                 }
-                if let onSuccess { self.heatDeadline = onSuccess() }
+                onSuccess?()
                 // Re-read so the next queued write reconciles against fresh truth.
                 await self.refresh()
             } catch {
                 self.state = rollback
                 self.banner = failureMessage
-                if let onFailure { self.heatDeadline = onFailure() }
+                onFailure?()
             }
         }
     }

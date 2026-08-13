@@ -3,6 +3,9 @@
 A single-screen iPad app for guests to control one pool: lights and their color, jets, and a
 timed heat boost. Built for a shared iPad locked to this app alone.
 
+Everything switches itself off. The heater and jets run for a chosen duration; the lights go
+off at dawn. Nothing a guest turns on can be left running indefinitely.
+
 Hardware it was written against: **Jandy AquaLink RS-4** driving a 6x10 plunge pool — a
 soaker, effectively a large hot tub, so setpoints run up to 104°F. `aux_1` is the color
 light, `aux_4` is the jets. See
@@ -18,7 +21,7 @@ cannot leave the device they were typed on.
 
 To reach the sign-in screen: **press and hold the top-left corner of the screen for three
 seconds.** There is no button, no menu, and no other path to it, so a guest will not find it.
-The same screen signs out.
+The same screen signs out and sets the pool's coordinates (see [dawn](#lights-off-at-dawn)).
 
 Be aware of what a signed-in device is: iAqualink issues no scoped or per-device tokens, so
 anything logged in can do everything the account can. On a shared iPad that is the main risk,
@@ -113,7 +116,7 @@ temp2 -> pool_set_point  (what the system heats to)
 An earlier version wrote both slots to the same value, which silently destroyed the other
 preset on every guest temperature change.
 
-## How heat works, and why it matters
+## How the automatic shutoffs work
 
 **The heater only produces heat when the target is above the current water temperature.** The
 controller will happily accept "heater on" with a satisfied thermostat and simply do nothing
@@ -127,6 +130,8 @@ and whether the pump is running. It deliberately does **not** try to interpret t
 and `1` meant "idle", and so reported "pool is at target" while the water sat 11°F below it.
 Observed on 2026-08-13: `pool_heater = 1` with the water climbing 93 → 95, i.e. `1` is
 heating. Don't narrate the controller's internals; report the numbers.
+
+### Heat
 
 Guests set the exact temperature with − / + (65–104°F, the controller's own limits) and then
 pick how long to run. The dial moves instantly and writes to the controller about a second
@@ -144,6 +149,35 @@ follows from that:
 - A failed shutoff keeps the deadline armed and retries on the next poll.
 - Stopping heat disarms the timer only *after* the controller confirms the heater is off.
 - Duration is capped at four hours no matter what is requested.
+
+### Jets
+
+The same mechanism, in minutes rather than hours: 15 / 30 / 60, capped at two. Nobody sits in
+a plunge pool for four hours, and a pump left running overnight is noise and wear for nothing.
+Every property above applies identically — including that a *failed* stop keeps the deadline
+armed, so the pump still gets switched off on a later tick.
+
+### Lights off at dawn
+
+Lights aren't a duration — nobody sets a timer for "until it's light out", and a light left on
+overnight is the one that actually gets forgotten. So the shutoff is an absolute time: the
+next sunrise.
+
+That is computed with the standard sunrise equation in
+[`SolarClock`](PoolHelper/Model/SolarClock.swift), accurate to about a minute and unit-tested
+against published times for New York in midsummer, midwinter and at the equinox. A hardcoded
+"6am" would be over an hour wrong for much of the year — in New York, sunrise moves more than
+four hours between June and December.
+
+It needs the pool's coordinates, entered once on the setup screen. **No location permission is
+requested and CoreLocation isn't used**: this is a wall-mounted kiosk at a fixed address, and a
+system permission prompt is a poor thing to put in front of guests or to handle inside Guided
+Access. The coordinates stay on the device and are not in this repository. Left blank, the
+lights simply go off at 6am.
+
+The deadline is armed whenever the app sees the lights on without one — which covers them being
+switched on from the official app, or the iPad restarting mid-evening — so a light is adopted
+rather than left to burn until morning.
 
 ## Type and sizing
 

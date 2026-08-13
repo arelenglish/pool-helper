@@ -9,7 +9,20 @@ struct SetupView: View {
     @State private var email = ""
     @State private var password = ""
     @State private var isWorking = false
+    @State private var latitude = ""
+    @State private var longitude = ""
     @State private var errorMessage: String?
+
+    /// Nil until both fields parse as real coordinates, which is what disables Save.
+    private var coordinate: SolarClock.Coordinate? {
+        guard let lat = Double(latitude.trimmingCharacters(in: .whitespaces)),
+              let lon = Double(longitude.trimmingCharacters(in: .whitespaces)),
+              (-90...90).contains(lat), (-180...180).contains(lon)
+        else { return nil }
+        return SolarClock.Coordinate(latitude: lat, longitude: lon)
+    }
+
+    private func saveLocation() { PoolLocationStore.save(coordinate) }
 
     var body: some View {
         NavigationStack {
@@ -33,11 +46,34 @@ struct SetupView: View {
                 Section {
                     Text("Guests pick both the temperature and how long to heat. Whatever "
                          + "they choose, the heater shuts off automatically after at most "
-                         + "\(Int(HeatSchedule.maxDuration / 3600)) hours.")
+                         + "\(store.heatMaxHours) hours, and the jets after their timer. "
+                         + "The lights switch off at dawn.")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
                 } header: {
-                    Text("Heating")
+                    Text("Automatic shutoff")
+                }
+
+                Section {
+                    LabeledContent("Latitude") {
+                        TextField("e.g. 41.4", text: $latitude)
+                            .keyboardType(.numbersAndPunctuation)
+                            .multilineTextAlignment(.trailing)
+                    }
+                    LabeledContent("Longitude") {
+                        TextField("e.g. -70.6", text: $longitude)
+                            .keyboardType(.numbersAndPunctuation)
+                            .multilineTextAlignment(.trailing)
+                    }
+                    Button("Save location") { saveLocation() }
+                        .disabled(coordinate == nil)
+                } header: {
+                    Text("Pool location")
+                } footer: {
+                    Text("Used only to work out when the sun rises, so the lights can switch "
+                         + "themselves off at dawn. It stays on this iPad, is never sent "
+                         + "anywhere, and no location permission is requested. Leave it blank "
+                         + "and the lights simply go off at 6am instead.")
                 }
 
                 if let errorMessage {
@@ -60,6 +96,12 @@ struct SetupView: View {
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Done") { dismiss() }
                 }
+            }
+        }
+        .onAppear {
+            if let saved = PoolLocationStore.load() {
+                latitude = String(saved.latitude)
+                longitude = String(saved.longitude)
             }
         }
     }

@@ -25,11 +25,14 @@ struct PoolHelperApp: App {
     /// nil in normal use, which makes `ContentView` build its own live store.
     private static func demoStore() -> PoolStore? {
         guard ProcessInfo.processInfo.arguments.contains("-demo") else { return nil }
+        let demoDefaults = UserDefaults(suiteName: "demo")!
         let client = MockIAqualinkClient()
         client.latency = 400_000_000  // makes the optimistic-update path visible
         return PoolStore(
             client: client,
-            schedule: HeatSchedule(defaults: UserDefaults(suiteName: "demo")!),
+            schedule: .heater(defaults: demoDefaults),
+            jetsSchedule: .jets(defaults: demoDefaults),
+            lightsSchedule: .lights(defaults: demoDefaults),
             credentials: .inMemory(.init(email: "demo@example.com", password: "demo")),
             pollInterval: .seconds(5)
         )

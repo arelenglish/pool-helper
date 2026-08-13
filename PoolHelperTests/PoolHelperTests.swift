@@ -83,12 +83,11 @@ struct ScreenParserTests {
 
 // MARK: - Heat deadline
 
-@Suite("Heat schedule")
-struct HeatScheduleTests {
-    private func freshSchedule() -> (HeatSchedule, UserDefaults) {
-        let suite = "heat-tests-\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suite)!
-        return (HeatSchedule(defaults: defaults), defaults)
+@Suite("Shutoff schedule")
+struct ShutoffScheduleTests {
+    private func freshSchedule() -> (ShutoffSchedule, UserDefaults) {
+        let defaults = UserDefaults(suiteName: "heat-tests-\(UUID().uuidString)")!
+        return (.heater(defaults: defaults), defaults)
     }
 
     @Test("Arming stores a deadline the requested distance out")
@@ -105,7 +104,7 @@ struct HeatScheduleTests {
         let (schedule, _) = freshSchedule()
         let now = Date(timeIntervalSince1970: 1_000_000)
         let deadline = schedule.arm(for: 24 * 3600, now: now)
-        #expect(deadline == now.addingTimeInterval(HeatSchedule.maxDuration))
+        #expect(deadline == now.addingTimeInterval(schedule.maxDuration!))
     }
 
     @Test("Expiry flips exactly at the deadline")
@@ -131,7 +130,7 @@ struct HeatScheduleTests {
         let now = Date(timeIntervalSince1970: 1_000_000)
         schedule.arm(for: 3600, now: now)
 
-        let afterRelaunch = HeatSchedule(defaults: defaults)
+        let afterRelaunch = ShutoffSchedule.heater(defaults: defaults)
         #expect(afterRelaunch.deadline == now.addingTimeInterval(3600))
     }
 
@@ -140,7 +139,7 @@ struct HeatScheduleTests {
         let (schedule, defaults) = freshSchedule()
         schedule.arm(for: 3600)
         schedule.disarm()
-        #expect(HeatSchedule(defaults: defaults).deadline == nil)
+        #expect(ShutoffSchedule.heater(defaults: defaults).deadline == nil)
     }
 }
 
@@ -152,14 +151,17 @@ struct PoolStoreTests {
     private func makeStore(
         state: PoolState = .demo,
         deadline: Date? = nil
-    ) -> (PoolStore, MockIAqualinkClient, HeatSchedule) {
+    ) -> (PoolStore, MockIAqualinkClient, ShutoffSchedule) {
         let client = MockIAqualinkClient(state: state)
         let defaults = UserDefaults(suiteName: "store-tests-\(UUID().uuidString)")!
-        let schedule = HeatSchedule(defaults: defaults)
+        let schedule = ShutoffSchedule.heater(defaults: defaults)
         schedule.deadline = deadline
         let store = PoolStore(
             client: client,
             schedule: schedule,
+            jetsSchedule: .jets(defaults: defaults),
+            lightsSchedule: .lights(defaults: defaults),
+            solar: SolarClock(coordinate: nil),
             credentials: .inMemory(.init(email: "a@b.com", password: "pw")),
             pollInterval: .seconds(60),
             setPointDebounce: .milliseconds(20)
@@ -174,12 +176,13 @@ struct PoolStoreTests {
         let (store, client, _) = makeStore(state: state)
         await store.refresh()
 
-        store.setJets(on: true)
+        store.startJets(for: 30 * 60)
         await store.settle()
 
         #expect(client.commandLog.contains("set_aux_4"))
         #expect(client.commandLog.filter { $0 == "set_aux_4" }.count == 1)
         #expect(store.state.areJetsOn == true)
+        #expect(store.jetsDeadline != nil, "the jets get a shutoff like the heater")
     }
 
     @Test("Asking for a state the pool is already in sends nothing")
@@ -191,7 +194,7 @@ struct PoolStoreTests {
         let (store, client, _) = makeStore(state: state)
         await store.refresh()
 
-        store.setJets(on: true)
+        store.startJets(for: 30 * 60)
         await store.settle()
 
         #expect(client.commandLog.contains("set_aux_4") == false)
@@ -206,7 +209,7 @@ struct PoolStoreTests {
         await store.refresh()
 
         client.failNextWrite()
-        store.setJets(on: true)
+        store.startJets(for: 30 * 60)
         #expect(store.state.areJetsOn == true, "should show immediately, before the write lands")
 
         await store.settle()
@@ -395,7 +398,7 @@ struct PoolStoreTests {
         )
         await store.refresh()
 
-        await store.enforceHeatDeadline()
+        await store.enforceDeadlines()
 
         #expect(client.commandLog.contains("set_pool_heater"))
         #expect(store.state.isHeaterOn == false)
@@ -411,7 +414,7 @@ struct PoolStoreTests {
             state: state, deadline: Date().addingTimeInterval(-7200)
         )
         await store.refresh()
-        await store.enforceHeatDeadline()
+        await store.enforceDeadlines()
 
         #expect(client.state.isHeaterOn == false, "the heater must not be left running")
     }
@@ -424,7 +427,7 @@ struct PoolStoreTests {
             state: state, deadline: Date().addingTimeInterval(1800)
         )
         await store.refresh()
-        await store.enforceHeatDeadline()
+        await store.enforceDeadlines()
 
         #expect(client.commandLog.contains("set_pool_heater") == false)
         #expect(schedule.deadline != nil)
@@ -446,12 +449,248 @@ struct PoolStoreTests {
         let client = MockIAqualinkClient()
         let store = PoolStore(
             client: client,
-            schedule: HeatSchedule(defaults: UserDefaults(suiteName: "s-\(UUID())")!),
+            schedule: .heater(defaults: UserDefaults(suiteName: "s-\(UUID())")!),
             credentials: .inMemory(nil),
             pollInterval: .seconds(60)
         )
         await store.refresh()
         #expect(store.connection == .needsSetup)
+    }
+}
+
+// MARK: - Jets and lights shut themselves off
+
+@Suite("Automatic shutoffs")
+@MainActor
+struct AutoShutoffTests {
+    private func makeStore(
+        state: PoolState = .demo,
+        coordinate: SolarClock.Coordinate? = nil
+    ) -> (PoolStore, MockIAqualinkClient, ShutoffSchedule, ShutoffSchedule) {
+        let client = MockIAqualinkClient(state: state)
+        let defaults = UserDefaults(suiteName: "auto-\(UUID().uuidString)")!
+        let jets = ShutoffSchedule.jets(defaults: defaults)
+        let lights = ShutoffSchedule.lights(defaults: defaults)
+        let store = PoolStore(
+            client: client,
+            schedule: .heater(defaults: defaults),
+            jetsSchedule: jets,
+            lightsSchedule: lights,
+            solar: SolarClock(coordinate: coordinate),
+            credentials: .inMemory(.init(email: "a@b.com", password: "pw")),
+            pollInterval: .seconds(60),
+            setPointDebounce: .milliseconds(20)
+        )
+        return (store, client, jets, lights)
+    }
+
+    // MARK: Jets
+
+    @Test("An elapsed jets deadline shuts the pump off")
+    func jetsExpire() async {
+        var state = PoolState.demo
+        state.areJetsOn = true
+        let (store, client, jets, _) = makeStore(state: state)
+        jets.deadline = Date().addingTimeInterval(-60)
+        await store.refresh()
+
+        await store.enforceDeadlines()
+
+        #expect(client.state.areJetsOn == false)
+        #expect(jets.deadline == nil)
+    }
+
+    @Test("A jets deadline that elapsed while the app was dead fires on the next tick")
+    func jetsSurviveDowntime() async {
+        var state = PoolState.demo
+        state.areJetsOn = true
+        let (store, client, jets, _) = makeStore(state: state)
+        jets.deadline = Date().addingTimeInterval(-7200)
+        await store.refresh()
+        await store.enforceDeadlines()
+
+        #expect(client.state.areJetsOn == false, "the pump must not be left running")
+    }
+
+    @Test("A live jets deadline is left alone")
+    func jetsLiveDeadline() async {
+        var state = PoolState.demo
+        state.areJetsOn = true
+        let (store, client, jets, _) = makeStore(state: state)
+        jets.deadline = Date().addingTimeInterval(600)
+        await store.refresh()
+        await store.enforceDeadlines()
+
+        #expect(client.commandLog.contains("set_aux_4") == false)
+        #expect(jets.deadline != nil)
+    }
+
+    @Test("A failed jets stop keeps the deadline armed")
+    func failedJetsStopKeepsDeadline() async {
+        // Same hazard as the heater: dropping the deadline on a failed stop would leave the
+        // pump running with nothing left to switch it off.
+        var state = PoolState.demo
+        state.areJetsOn = true
+        let (store, client, jets, _) = makeStore(state: state)
+        jets.deadline = Date().addingTimeInterval(600)
+        await store.refresh()
+
+        client.failNextWrite()
+        store.stopJets()
+        await store.settle()
+
+        #expect(store.state.areJetsOn == true, "rolled back — they really are still running")
+        #expect(jets.deadline != nil, "the safety net must survive a failed stop")
+    }
+
+    @Test("Jets duration is capped at two hours")
+    func jetsCap() async {
+        let (store, _, jets, _) = makeStore()
+        store.startJets(for: 24 * 3600)
+        await store.settle()
+
+        let remaining = jets.remaining() ?? 0
+        #expect(remaining <= 2 * 3600 + 1)
+    }
+
+    // MARK: Lights
+
+    @Test("Turning the lights on arms a dawn shutoff")
+    func lightsArmDawn() async {
+        var state = PoolState.demo
+        state.isLightOn = false
+        let (store, _, _, lights) = makeStore(state: state)
+        await store.refresh()
+
+        store.setLight(on: true)
+        await store.settle()
+
+        #expect(lights.deadline != nil, "a light switched on at night must have an off time")
+        #expect(store.lightsDeadline == lights.deadline)
+    }
+
+    @Test("Lights found already on get a dawn shutoff too")
+    func lightsArmWhenFoundOn() async {
+        // Covers the light being switched on from the official app, or the iPad restarting
+        // mid-evening: the app adopts it rather than leaving it to burn until morning.
+        var state = PoolState.demo
+        state.isLightOn = true
+        let (store, _, _, lights) = makeStore(state: state)
+        await store.refresh()
+        await store.enforceDeadlines()
+
+        #expect(lights.deadline != nil)
+    }
+
+    @Test("Turning the lights off clears the dawn shutoff")
+    func lightsDisarm() async {
+        var state = PoolState.demo
+        state.isLightOn = true
+        let (store, _, _, lights) = makeStore(state: state)
+        await store.refresh()
+        await store.enforceDeadlines()
+        #expect(lights.deadline != nil)
+
+        store.setLight(on: false)
+        await store.settle()
+
+        #expect(lights.deadline == nil)
+        #expect(store.lightsDeadline == nil)
+    }
+
+    @Test("Dawn turns the lights off")
+    func lightsExpireAtDawn() async {
+        var state = PoolState.demo
+        state.isLightOn = true
+        let (store, client, _, lights) = makeStore(state: state)
+        await store.refresh()
+        lights.deadline = Date().addingTimeInterval(-60)
+
+        await store.enforceDeadlines()
+
+        #expect(client.state.isLightOn == false)
+        #expect(lights.deadline == nil)
+    }
+
+    @Test("Picking a color also arms the dawn shutoff")
+    func colorArmsDawn() async {
+        var state = PoolState.demo
+        state.isLightOn = false
+        let (store, _, _, lights) = makeStore(state: state)
+        await store.refresh()
+
+        store.setLightColor(LightColor.all[3])
+        await store.settle()
+
+        #expect(lights.deadline != nil, "a color tap turns the light on, so it needs an off time")
+    }
+}
+
+// MARK: - Sunrise
+
+@Suite("Solar clock")
+struct SolarClockTests {
+    /// New York City. Published sunrise times are the reference; the algorithm is good to
+    /// about a minute, so a few minutes of tolerance is plenty.
+    private let nyc = SolarClock.Coordinate(latitude: 40.7128, longitude: -74.0060)
+
+    private func utc(_ y: Int, _ mo: Int, _ d: Int, _ h: Int, _ mi: Int) -> Date {
+        var c = DateComponents()
+        (c.year, c.month, c.day, c.hour, c.minute) = (y, mo, d, h, mi)
+        var cal = Calendar(identifier: .gregorian)
+        cal.timeZone = TimeZone(identifier: "UTC")!
+        return cal.date(from: c)!
+    }
+
+    @Test("Midsummer sunrise in New York")
+    func summerSunrise() {
+        let clock = SolarClock(coordinate: nyc)
+        let rise = clock.sunrise(onDayOf: utc(2026, 6, 21, 12, 0), at: nyc)
+        // 2026-06-21: about 05:25 EDT = 09:25 UTC.
+        let expected = utc(2026, 6, 21, 9, 25)
+        #expect(rise != nil)
+        #expect(abs(rise!.timeIntervalSince(expected)) < 300, "got \(rise!)")
+    }
+
+    @Test("Midwinter sunrise in New York")
+    func winterSunrise() {
+        let clock = SolarClock(coordinate: nyc)
+        let rise = clock.sunrise(onDayOf: utc(2026, 12, 21, 12, 0), at: nyc)
+        // 2026-12-21: about 07:17 EST = 12:17 UTC. Over four hours later in the day than in
+        // June, which is exactly why a hardcoded "6am" would be wrong half the year.
+        let expected = utc(2026, 12, 21, 12, 17)
+        #expect(rise != nil)
+        #expect(abs(rise!.timeIntervalSince(expected)) < 300, "got \(rise!)")
+    }
+
+    @Test("The next dawn is always in the future")
+    func nextDawnIsFuture() {
+        let clock = SolarClock(coordinate: nyc)
+        for hour in [0, 6, 9, 12, 18, 23] {
+            let now = utc(2026, 8, 13, hour, 30)
+            #expect(clock.nextDawn(after: now) > now, "hour \(hour)")
+        }
+    }
+
+    @Test("Without coordinates it falls back to a fixed hour")
+    func fallback() {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(identifier: "UTC")!
+        let clock = SolarClock(coordinate: nil, fallbackHour: 6)
+
+        let dawn = clock.nextDawn(after: utc(2026, 8, 13, 23, 0), calendar: calendar)
+        #expect(dawn == utc(2026, 8, 14, 6, 0))
+
+        let sameDay = clock.nextDawn(after: utc(2026, 8, 13, 1, 0), calendar: calendar)
+        #expect(sameDay == utc(2026, 8, 13, 6, 0))
+    }
+
+    @Test("Polar night yields no sunrise rather than a wrong one")
+    func polar() {
+        // Longyearbyen in December: the sun does not rise at all.
+        let svalbard = SolarClock.Coordinate(latitude: 78.22, longitude: 15.65)
+        let clock = SolarClock(coordinate: svalbard)
+        #expect(clock.sunrise(onDayOf: utc(2026, 12, 21, 12, 0), at: svalbard) == nil)
     }
 }
 
