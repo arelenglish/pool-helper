@@ -245,7 +245,6 @@ struct PoolStoreTests {
         #expect(store.targetTemperature == 92, "the number must track the finger, not the network")
         #expect(client.commandLog.count == commandsBefore, "no write until the tapping stops")
 
-        try? await Task.sleep(for: .milliseconds(60))
         await store.settle()
 
         #expect(client.commandLog.contains("set_temps:92"))
@@ -303,7 +302,6 @@ struct PoolStoreTests {
 
         client.failNextWrite()
         store.adjustTargetTemperature(to: 99)
-        try? await Task.sleep(for: .milliseconds(60))
         await store.settle()
 
         #expect(store.targetTemperature == original, "showing 99 when it's not set would lie")
@@ -626,6 +624,200 @@ struct AutoShutoffTests {
     }
 }
 
+// MARK: - Pump and light-boot handling
+
+@Suite("Pump and light boot")
+@MainActor
+struct PumpAndLightTests {
+    private func makeStore(state: PoolState = .demo)
+        -> (PoolStore, MockIAqualinkClient, PumpOwnership, ShutoffSchedule) {
+        let client = MockIAqualinkClient(state: state)
+        let defaults = UserDefaults(suiteName: "pump-\(UUID().uuidString)")!
+        let heat = ShutoffSchedule.heater(defaults: defaults)
+        let pump = PumpOwnership(defaults: defaults)
+        let store = PoolStore(
+            client: client,
+            schedule: heat,
+            jetsSchedule: .jets(defaults: defaults),
+            lightsSchedule: .lights(defaults: defaults),
+            solar: SolarClock(coordinate: nil),
+            pump: pump,
+            credentials: .inMemory(.init(email: "a@b.com", password: "pw")),
+            pollInterval: .seconds(60),
+            setPointDebounce: .milliseconds(20)
+        )
+        return (store, client, pump, heat)
+    }
+
+    // MARK: Pump
+
+    @Test("Heating with the pump off starts the pump")
+    func startsPump() async {
+        var state = PoolState.demo
+        state.isPumpOn = false
+        state.poolTemp = 80
+        let (store, client, pump, _) = makeStore(state: state)
+        await store.refresh()
+
+        store.adjustTargetTemperature(to: 95)
+        store.startHeating(for: 3600)
+        await store.settle()
+
+        #expect(client.state.isPumpOn == true, "no circulation means no heat")
+        #expect(client.state.isHeaterOn == true)
+        #expect(pump.startedForHeat == true, "and we owe it an off")
+    }
+
+    @Test("A pump already running is left alone")
+    func leavesRunningPumpAlone() async {
+        var state = PoolState.demo
+        state.isPumpOn = true
+        state.poolTemp = 80
+        let (store, client, pump, _) = makeStore(state: state)
+        await store.refresh()
+
+        store.adjustTargetTemperature(to: 95)
+        store.startHeating(for: 3600)
+        await store.settle()
+
+        #expect(client.commandLog.contains("set_pool_pump") == false,
+                "it may be on the owner's own filtration schedule")
+        #expect(pump.startedForHeat == false)
+    }
+
+    @Test("Stopping heat returns the pump only if we started it")
+    func releasesPumpOnStop() async {
+        var state = PoolState.demo
+        state.isPumpOn = false
+        state.poolTemp = 80
+        let (store, client, pump, _) = makeStore(state: state)
+        await store.refresh()
+        store.adjustTargetTemperature(to: 95)
+        store.startHeating(for: 3600)
+        await store.settle()
+
+        store.stopHeating()
+        await store.settle()
+
+        #expect(client.state.isPumpOn == false, "we started it, so we switch it back off")
+        #expect(client.state.isHeaterOn == false)
+        #expect(pump.startedForHeat == false)
+    }
+
+    @Test("A pump we didn't start survives stopping heat")
+    func keepsForeignPumpOnStop() async {
+        var state = PoolState.demo
+        state.isPumpOn = true
+        state.isHeaterOn = true
+        let (store, client, _, _) = makeStore(state: state)
+        await store.refresh()
+
+        store.stopHeating()
+        await store.settle()
+
+        #expect(client.state.isPumpOn == true, "never switch off someone else's pump")
+    }
+
+    @Test("The heat deadline hands the pump back too")
+    func deadlineReleasesPump() async {
+        var state = PoolState.demo
+        state.isPumpOn = false
+        state.poolTemp = 80
+        let (store, client, pump, heat) = makeStore(state: state)
+        await store.refresh()
+        store.adjustTargetTemperature(to: 95)
+        store.startHeating(for: 3600)
+        await store.settle()
+
+        heat.deadline = Date().addingTimeInterval(-60)
+        await store.enforceDeadlines()
+
+        #expect(client.state.isHeaterOn == false)
+        #expect(client.state.isPumpOn == false, "a pump left running is the bug we avoid")
+        #expect(pump.startedForHeat == false)
+    }
+
+    // MARK: Light boot
+
+    @Test("A booting light keeps showing the guest's choice")
+    func holdsChoiceWhileBooting() async {
+        // The fixture reports itself off for tens of seconds after the command lands. Without
+        // the hold the guest sees their tap register, flip to Off, then come back on by itself.
+        var state = PoolState.demo
+        state.isLightOn = false
+        let (store, client, _, _) = makeStore(state: state)
+        await store.refresh()
+        client.simulateLightBoot()               // fixture won't report on for a while
+
+        store.setLightColor(LightColor.all[3])   // Caribbean Blue, index 4
+        await store.settle()
+        await store.refresh()
+
+        #expect(store.state.isLightOn == true, "the guest's choice stays on screen")
+        #expect(store.state.lightColorIndex == 4)
+        #expect(store.isLightStarting == true)
+    }
+
+    @Test("Once the fixture reports in, the hold releases")
+    func holdReleasesWhenControllerAgrees() async {
+        var state = PoolState.demo
+        state.isLightOn = false
+        let (store, client, _, _) = makeStore(state: state)
+        await store.refresh()
+
+        client.simulateLightBoot()
+        store.setLightColor(LightColor.all[3])
+        await store.settle()
+        await store.refresh()
+        #expect(store.isLightStarting == true, "still booting")
+
+        client.simulateLightBoot(false)
+        client.state.isLightOn = true            // finished booting
+        client.state.lightColorIndex = 4
+        await store.refresh()
+
+        #expect(store.isLightStarting == false)
+        #expect(store.state.isLightOn == true)
+    }
+
+    @Test("A booting light can still be cancelled")
+    func canCancelABootingLight() async {
+        // The controller says "off" the whole time it's booting, so reconciling against it
+        // would send nothing and the light would come on anyway.
+        var state = PoolState.demo
+        state.isLightOn = false
+        let (store, client, _, _) = makeStore(state: state)
+        await store.refresh()
+
+        client.simulateLightBoot()
+        store.setLight(on: true)
+        await store.settle()
+        await store.refresh()
+        let afterOn = client.commandLog.filter { $0 == "set_aux_1" }.count
+
+        store.setLight(on: false)
+        await store.settle()
+
+        #expect(client.commandLog.filter { $0 == "set_aux_1" }.count == afterOn + 1,
+                "the off must actually be sent")
+    }
+
+    @Test("A failed light command drops the hold rather than lying")
+    func failedLightClearsHold() async {
+        var state = PoolState.demo
+        state.isLightOn = false
+        let (store, client, _, _) = makeStore(state: state)
+        await store.refresh()
+
+        client.failNextWrite()
+        store.setLight(on: true)
+        await store.settle()
+
+        #expect(store.state.isLightOn == false)
+        #expect(store.isLightStarting == false)
+    }
+}
+
 // MARK: - Sunrise
 
 @Suite("Solar clock")
@@ -683,6 +875,27 @@ struct SolarClockTests {
 
         let sameDay = clock.nextDawn(after: utc(2026, 8, 13, 1, 0), calendar: calendar)
         #expect(sameDay == utc(2026, 8, 13, 6, 0))
+    }
+
+    @Test("A located coordinate is coarsened before it's stored")
+    func coarsening() {
+        // What CoreLocation hands back is precise enough to identify a house. Two decimal
+        // places is about a kilometre, which moves sunrise by a couple of seconds.
+        let precise = SolarClock.Coordinate(latitude: 41.38472913, longitude: -70.61239847)
+        let coarse = precise.coarse
+        #expect(coarse.latitude == 41.38)
+        #expect(coarse.longitude == -70.61)
+    }
+
+    @Test("Coarsening costs no meaningful accuracy")
+    func coarseningIsHarmless() {
+        let precise = SolarClock.Coordinate(latitude: 40.712834, longitude: -74.006012)
+        let day = utc(2026, 8, 13, 12, 0)
+        let exact = SolarClock(coordinate: precise).sunrise(onDayOf: day, at: precise)
+        let rounded = SolarClock(coordinate: precise.coarse)
+            .sunrise(onDayOf: day, at: precise.coarse)
+        #expect(exact != nil && rounded != nil)
+        #expect(abs(exact!.timeIntervalSince(rounded!)) < 10, "under ten seconds apart")
     }
 
     @Test("Polar night yields no sunrise rather than a wrong one")

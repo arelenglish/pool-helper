@@ -86,6 +86,7 @@ struct ContentView: View {
         LightsCard(
             isOn: store.state.isLightOn,
             colorIndex: store.state.lightColorIndex,
+            isStarting: store.isLightStarting,
             setOn: store.setLight,
             setColor: store.setLightColor
         )

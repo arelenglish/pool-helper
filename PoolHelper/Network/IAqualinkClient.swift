@@ -12,6 +12,7 @@ nonisolated protocol IAqualinkClient: Sendable {
     func setLightColor(index: Int, session: Session) async throws
     func setPoolSetPoint(_ degrees: Int, session: Session) async throws
     func togglePoolHeater(session: Session) async throws
+    func togglePoolPump(session: Session) async throws
 }
 
 /// Parses the API's unusual response shape: arrays of single-key objects, where absent

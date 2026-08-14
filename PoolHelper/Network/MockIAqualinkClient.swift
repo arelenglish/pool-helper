@@ -8,6 +8,7 @@ nonisolated final class MockIAqualinkClient: IAqualinkClient, @unchecked Sendabl
     private var _state: PoolState
     private var _failNextWrite = false
     private var _expireNextRead = false
+    private var _lightBooting = false
 
     /// Artificial latency, in nanoseconds. Zero in tests, non-zero in previews.
     var latency: UInt64 = 0
@@ -26,6 +27,11 @@ nonisolated final class MockIAqualinkClient: IAqualinkClient, @unchecked Sendabl
 
     /// Makes the next read throw `.sessionExpired`, for exercising re-login.
     func expireNextRead() { lock.withLock { _expireNextRead = true } }
+
+    /// Models a colour fixture that boots: light commands are accepted and logged, but the
+    /// reported state stays put, exactly as the real controller behaves for tens of seconds
+    /// after the lamp is asked to come on.
+    func simulateLightBoot(_ booting: Bool = true) { lock.withLock { _lightBooting = booting } }
 
     // MARK: - IAqualinkClient
 
@@ -49,6 +55,8 @@ nonisolated final class MockIAqualinkClient: IAqualinkClient, @unchecked Sendabl
         try await write("set_aux_\(circuit.rawValue)") { state in
             switch circuit {
             case .light:
+                // Read without re-locking: `write` already holds the lock.
+                guard !self._lightBooting else { return }
                 state.isLightOn.toggle()
                 // Turning a color light on restores its last color; off clears it.
                 state.lightColorIndex = state.isLightOn ? (state.lightColorIndex ?? 1) : nil
@@ -60,6 +68,7 @@ nonisolated final class MockIAqualinkClient: IAqualinkClient, @unchecked Sendabl
 
     func setLightColor(index: Int, session: Session) async throws {
         try await write("set_light:\(index)") { state in
+            guard !self._lightBooting else { return }
             state.lightColorIndex = index
             state.isLightOn = true  // setting a color implicitly turns the light on
         }
@@ -71,6 +80,10 @@ nonisolated final class MockIAqualinkClient: IAqualinkClient, @unchecked Sendabl
 
     func togglePoolHeater(session: Session) async throws {
         try await write("set_pool_heater") { $0.isHeaterOn.toggle() }
+    }
+
+    func togglePoolPump(session: Session) async throws {
+        try await write("set_pool_pump") { $0.isPumpOn.toggle() }
     }
 
     // MARK: - Helpers

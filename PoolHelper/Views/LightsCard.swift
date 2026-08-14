@@ -3,6 +3,7 @@ import SwiftUI
 struct LightsCard: View {
     let isOn: Bool
     let colorIndex: Int?
+    let isStarting: Bool
     let setOn: (Bool) -> Void
     let setColor: (LightColor) -> Void
 
@@ -19,7 +20,10 @@ struct LightsCard: View {
                 BigToggle(
                     isOn: isOn,
                     title: isOn ? (selected?.name ?? "On") : "Off",
-                    subtitle: isOn ? "Tap a color to change it" : "Tap to turn on the lights",
+                    // These fixtures boot for tens of seconds before they light. Saying so
+                    // turns an apparently unresponsive tap into an expected wait.
+                    subtitle: isStarting ? "Starting up…"
+                        : (isOn ? "Tap a color to change it" : "Tap to turn on the lights"),
                     tint: PoolTheme.glow,
                     action: setOn
                 )
@@ -114,7 +118,8 @@ struct ColorSwatch: View {
 #Preview(traits: .landscapeLeft) {
     ZStack {
         PoolBackground()
-        LightsCard(isOn: true, colorIndex: 4, setOn: { _ in }, setColor: { _ in })
+        LightsCard(isOn: true, colorIndex: 4, isStarting: false,
+                   setOn: { _ in }, setColor: { _ in })
             .frame(width: 380, height: 560)
     }
 }

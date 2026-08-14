@@ -12,6 +12,11 @@ struct SetupView: View {
     @State private var latitude = ""
     @State private var longitude = ""
     @State private var errorMessage: String?
+    @State private var isLocating = false
+    @State private var locationMessage: String?
+    @State private var locationFailed = false
+    @State private var savedCoordinate: SolarClock.Coordinate?
+    @State private var finder = LocationFinder()
 
     /// Nil until both fields parse as real coordinates, which is what disables Save.
     private var coordinate: SolarClock.Coordinate? {
@@ -22,7 +27,30 @@ struct SetupView: View {
         return SolarClock.Coordinate(latitude: lat, longitude: lon)
     }
 
-    private func saveLocation() { PoolLocationStore.save(coordinate) }
+    /// Fills the fields rather than saving straight off, so the owner sees what's about to be
+    /// stored — and can still correct it — before it takes effect.
+    private func useCurrentLocation() async {
+        isLocating = true
+        locationMessage = nil
+        locationFailed = false
+        defer { isLocating = false }
+        do {
+            let found = try await finder.currentCoordinate()
+            latitude = String(found.latitude)
+            longitude = String(found.longitude)
+            locationMessage = "Found it. Tap Save location to use it."
+        } catch {
+            locationFailed = true
+            locationMessage = error.localizedDescription
+        }
+    }
+
+    private func saveLocation() {
+        PoolLocationStore.save(coordinate)
+        savedCoordinate = coordinate
+        locationFailed = false
+        locationMessage = "Saved. The lights will switch off at dawn from tomorrow."
+    }
 
     var body: some View {
         NavigationStack {
@@ -55,6 +83,16 @@ struct SetupView: View {
                 }
 
                 Section {
+                    Button {
+                        Task { await useCurrentLocation() }
+                    } label: {
+                        Label(
+                            isLocating ? "Locating…" : "Use this iPad's location",
+                            systemImage: "location.fill"
+                        )
+                    }
+                    .disabled(isLocating)
+
                     LabeledContent("Latitude") {
                         TextField("e.g. 41.4", text: $latitude)
                             .keyboardType(.numbersAndPunctuation)
@@ -66,14 +104,22 @@ struct SetupView: View {
                             .multilineTextAlignment(.trailing)
                     }
                     Button("Save location") { saveLocation() }
-                        .disabled(coordinate == nil)
+                        .disabled(coordinate == nil || coordinate == savedCoordinate)
+
+                    if let locationMessage {
+                        Text(locationMessage)
+                            .font(.footnote)
+                            .foregroundStyle(locationFailed ? .red : .secondary)
+                    }
                 } header: {
                     Text("Pool location")
                 } footer: {
                     Text("Used only to work out when the sun rises, so the lights can switch "
-                         + "themselves off at dawn. It stays on this iPad, is never sent "
-                         + "anywhere, and no location permission is requested. Leave it blank "
-                         + "and the lights simply go off at 6am instead.")
+                         + "themselves off at dawn. Location is read once, here — never while "
+                         + "guests are using the app — and only what you save is kept: a "
+                         + "coordinate rounded to about a kilometre, stored on this iPad and "
+                         + "never sent anywhere. Leave it blank and the lights go off at 6am "
+                         + "instead.")
                 }
 
                 if let errorMessage {
@@ -102,6 +148,7 @@ struct SetupView: View {
             if let saved = PoolLocationStore.load() {
                 latitude = String(saved.latitude)
                 longitude = String(saved.longitude)
+                savedCoordinate = saved
             }
         }
     }

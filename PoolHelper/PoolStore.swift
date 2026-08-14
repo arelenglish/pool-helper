@@ -22,6 +22,9 @@ final class PoolStore {
     /// Transient message shown when an action fails and gets rolled back.
     private(set) var banner: String?
 
+    /// True while the light has been asked for but the fixture hasn't reported in yet.
+    private(set) var isLightStarting = false
+
     /// The temperature the guest has dialed in. Normally mirrors the controller's setpoint,
     /// but runs ahead of it while an adjustment is still being debounced.
     private(set) var targetTemperature: Int = PoolState.placeholder.poolSetPoint
@@ -35,6 +38,7 @@ final class PoolStore {
     private let jetsSchedule: ShutoffSchedule
     private let lightsSchedule: ShutoffSchedule
     private let solar: SolarClock
+    private let pump: PumpOwnership
     private let credentials: CredentialProvider
     private var session: Session?
     private var pollTask: Task<Void, Never>?
@@ -43,6 +47,14 @@ final class PoolStore {
     /// Pending debounced setpoint write. Non-nil means the guest is mid-adjustment, which
     /// also suppresses polling from yanking the number back under their finger.
     private var setPointTask: Task<Void, Never>?
+
+    /// A colour light doesn't switch on — it boots, taking tens of seconds, and reports
+    /// itself off the whole time. Without this the guest sees their choice register, flip
+    /// back to "Off" on the next poll, then come on again by itself. Holds the requested
+    /// state on screen until the controller catches up or the window lapses.
+    private var pendingLight: (isOn: Bool, colorIndex: Int?, until: Date)?
+    /// Generous: changing colour on these fixtures power-cycles the lamp.
+    private static let lightBootWindow: TimeInterval = 60
 
     private let pollInterval: Duration
     private let setPointDebounce: Duration
@@ -53,6 +65,7 @@ final class PoolStore {
         jetsSchedule: ShutoffSchedule = .jets(),
         lightsSchedule: ShutoffSchedule = .lights(),
         solar: SolarClock = SolarClock(coordinate: PoolLocationStore.load()),
+        pump: PumpOwnership = PumpOwnership(),
         credentials: CredentialProvider = .keychain,
         pollInterval: Duration = .seconds(15),
         setPointDebounce: Duration = .milliseconds(1200)
@@ -62,6 +75,7 @@ final class PoolStore {
         self.jetsSchedule = jetsSchedule
         self.lightsSchedule = lightsSchedule
         self.solar = solar
+        self.pump = pump
         self.credentials = credentials
         self.pollInterval = pollInterval
         self.setPointDebounce = setPointDebounce
@@ -70,8 +84,13 @@ final class PoolStore {
         self.lightsDeadline = lightsSchedule.deadline
     }
 
-    /// Waits for any queued write (and its follow-up refresh) to finish. Tests only.
-    func settle() async { _ = await writeChain.value }
+    /// Waits for a pending debounced setpoint write, then for the write queue to drain.
+    /// Tests only — awaiting the debounce rather than sleeping past it keeps them from
+    /// racing the clock on a loaded machine.
+    func settle() async {
+        if let setPointTask { _ = await setPointTask.value }
+        _ = await writeChain.value
+    }
 
     var heatPresets: [TimeInterval] { schedule.presets }
     var jetsPresets: [TimeInterval] { jetsSchedule.presets }
@@ -114,6 +133,10 @@ final class PoolStore {
             state = fresh
             // Don't overwrite a number the guest is actively adjusting.
             if setPointTask == nil { targetTemperature = fresh.poolSetPoint }
+            // `confirmed` deliberately keeps the controller's raw answer — write
+            // reconciliation must run against the truth — while `state` may hold the guest's
+            // pending light choice for display.
+            applyLightHold()
             // Sync here rather than in the write's completion hook: hooks run before the
             // follow-up refresh, so they'd be deciding against state we already know is stale.
             syncLightsDawn()
@@ -129,17 +152,24 @@ final class PoolStore {
     // MARK: - Guest actions
 
     func setLight(on: Bool) {
+        // A booting light still reports itself off, so reconciling against the controller
+        // would decide "already off" and send nothing — leaving the guest unable to cancel
+        // a light that is about to come on. Our pending intent is the better truth here.
+        let believedOn = pendingLight?.isOn
+        markLightPending(isOn: on, colorIndex: on ? state.lightColorIndex : nil)
         apply(
             { $0.isLightOn = on },
             action: { [client] session, confirmed in
-                guard confirmed.isLightOn != on else { return }
+                guard (believedOn ?? confirmed.isLightOn) != on else { return }
                 try await client.toggleAux(.light, session: session)
             },
-            failureMessage: "Couldn't reach the light."
+            failureMessage: "Couldn't reach the light.",
+            onFailure: { [weak self] in self?.clearLightPending() }
         )
     }
 
     func setLightColor(_ color: LightColor) {
+        markLightPending(isOn: true, colorIndex: color.id)
         apply(
             { $0.lightColorIndex = color.id; $0.isLightOn = true },
             action: { [client] session, _ in
@@ -147,7 +177,8 @@ final class PoolStore {
                 // so it needs no reconciliation.
                 try await client.setLightColor(index: color.id, session: session)
             },
-            failureMessage: "Couldn't change the color."
+            failureMessage: "Couldn't change the color.",
+            onFailure: { [weak self] in self?.clearLightPending() }
         )
     }
 
@@ -235,9 +266,15 @@ final class PoolStore {
         heatDeadline = schedule.arm(for: duration)
         apply(
             { $0.isHeaterOn = true; $0.poolSetPoint = target },
-            action: { [client] session, confirmed in
+            action: { [client, pump] session, confirmed in
                 if confirmed.poolSetPoint != target {
                     try await client.setPoolSetPoint(target, session: session)
+                }
+                // Circulation first: the heater simply will not fire without it, so asking
+                // for heat with the pump off would start a timer and warm nothing.
+                if !confirmed.isPumpOn {
+                    try await client.togglePoolPump(session: session)
+                    pump.startedForHeat = true
                 }
                 guard !confirmed.isHeaterOn else { return }
                 try await client.togglePoolHeater(session: session)
@@ -253,9 +290,15 @@ final class PoolStore {
     func stopHeating() {
         apply(
             { $0.isHeaterOn = false },
-            action: { [client] session, confirmed in
-                guard confirmed.isHeaterOn else { return }
-                try await client.togglePoolHeater(session: session)
+            action: { [client, pump] session, confirmed in
+                if confirmed.isHeaterOn {
+                    try await client.togglePoolHeater(session: session)
+                }
+                // Hand the pump back only if we were the ones who started it.
+                if pump.startedForHeat, confirmed.isPumpOn {
+                    try await client.togglePoolPump(session: session)
+                }
+                pump.release()
             },
             failureMessage: "Couldn't stop the heater.",
             // Disarm only once the heater is actually off. Disarming up front would mean a
@@ -278,6 +321,31 @@ final class PoolStore {
         await enforceHeater(now: now)
         await enforceJets(now: now)
         await enforceLights(now: now)
+    }
+
+    private func markLightPending(isOn: Bool, colorIndex: Int?) {
+        pendingLight = (isOn, colorIndex, Date().addingTimeInterval(Self.lightBootWindow))
+        isLightStarting = isOn
+    }
+
+    private func clearLightPending() {
+        pendingLight = nil
+        isLightStarting = false
+    }
+
+    /// Shows the guest's choice until the fixture agrees, or the window lapses and the
+    /// controller wins. Only `state` is touched — never `confirmed`.
+    private func applyLightHold(now: Date = Date()) {
+        guard let pending = pendingLight else { return }
+        let agrees = confirmed.isLightOn == pending.isOn
+            && (pending.colorIndex == nil || confirmed.lightColorIndex == pending.colorIndex)
+        if agrees || now >= pending.until {
+            clearLightPending()
+            return
+        }
+        state.isLightOn = pending.isOn
+        if let index = pending.colorIndex { state.lightColorIndex = index }
+        isLightStarting = pending.isOn
     }
 
     /// Keeps the lights' dawn deadline in step with reality. Armed whenever the lights are
@@ -309,6 +377,16 @@ final class PoolStore {
                 return
             }
         }
+        if pump.startedForHeat, confirmed.isPumpOn {
+            do {
+                try await client.togglePoolPump(session: session)
+                state.isPumpOn = false
+                confirmed.isPumpOn = false
+            } catch {
+                return  // retried on the next tick; the deadline is still armed
+            }
+        }
+        pump.release()
         schedule.disarm()
         heatDeadline = nil
         state.isHeaterOn = false

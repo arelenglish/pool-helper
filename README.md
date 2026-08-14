@@ -93,6 +93,11 @@ tested against real iPad widths.
 
 ## Still to confirm on-site
 
+**`set_pool_pump` is unverified.** The auto-start above uses the standard iAqualink command
+name but has never been exercised against this controller — confirming it would mean cycling a
+running filter pump, which isn't worth the wear. Check it the first time heat is requested
+while the pump is off, which is the case the feature exists for.
+
 **The light color names.** `aux_1` reports `subtype: 4`. Community references usually map
 subtype 4 to Pentair IntelliBrite, but this fixture was identified as a Jandy Color LED, so
 the Jandy 14-color table ships. Tap through a few colors and check the names match the water.
@@ -150,12 +155,36 @@ follows from that:
 - Stopping heat disarms the timer only *after* the controller confirms the heater is off.
 - Duration is capped at four hours no matter what is requested.
 
+**The pump is started automatically if it isn't already running**, because a Jandy heater will
+not fire without circulation — asking for heat with the pump off starts a timer and warms
+nothing. The app then *owns* that pump: it switches it back off when heating ends or the
+deadline fires, since a pump left running indefinitely is the same failure these deadlines
+exist to prevent. A pump that was already running is left strictly alone — it may be on the
+owner's own filtration schedule, and switching that off is not the app's business. Ownership
+is persisted, so a pump can still be released on a later launch.
+
 ### Jets
 
 The same mechanism, in minutes rather than hours: 15 / 30 / 60, capped at two. Nobody sits in
 a plunge pool for four hours, and a pump left running overnight is noise and wear for nothing.
 Every property above applies identically — including that a *failed* stop keeps the deadline
 armed, so the pump still gets switched off on a later tick.
+
+### Lights take time to boot
+
+These colour fixtures don't switch on — they boot, taking tens of seconds, and the controller
+reports them **off** the whole time. Left alone, a guest sees their choice register, flip back
+to "Off" on the next poll, then come on by itself half a minute later.
+
+So the app holds the requested state on screen until the controller agrees or a 60-second
+window lapses, and says "Starting up…" to turn an apparently dead tap into an expected wait.
+Two details matter:
+
+- Only the *display* is held. Write reconciliation still runs against the controller's raw
+  answer, so commands are never computed from a fiction.
+- Except for the light itself, where reconciliation uses the pending intent. Otherwise a guest
+  trying to cancel a still-booting light would hit "already off" and no command would be sent —
+  and the light would come on anyway.
 
 ### Lights off at dawn
 
@@ -169,11 +198,18 @@ against published times for New York in midsummer, midwinter and at the equinox.
 "6am" would be over an hour wrong for much of the year — in New York, sunrise moves more than
 four hours between June and December.
 
-It needs the pool's coordinates, entered once on the setup screen. **No location permission is
-requested and CoreLocation isn't used**: this is a wall-mounted kiosk at a fixed address, and a
-system permission prompt is a poor thing to put in front of guests or to handle inside Guided
-Access. The coordinates stay on the device and are not in this repository. Left blank, the
-lights simply go off at 6am.
+It needs the pool's coordinates. The setup screen reads them from the iPad with one tap, or
+you can type them. Location is requested **only there, only on a tap** — never on launch and
+never while guests are using the app — so the permission prompt lands during admin setup,
+before Guided Access is engaged.
+
+What gets kept is deliberately blunt: the coordinate is rounded to two decimal places, about a
+kilometre, which shifts sunrise by a couple of seconds. Enough to know which town, not which
+house. It is stored on the iPad, is never transmitted, and is not in this repository.
+
+Crucially, location only *fills in* the stored coordinate — `SolarClock` reads the stored value
+from then on. Revoke the permission afterwards and dawn keeps working. Leave the coordinates
+blank and the lights simply go off at 6am.
 
 The deadline is armed whenever the app sees the lights on without one — which covers them being
 switched on from the official app, or the iPad restarting mid-evening — so a light is adopted

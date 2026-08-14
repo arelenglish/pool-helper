@@ -119,6 +119,12 @@ nonisolated struct LiveIAqualinkClient: IAqualinkClient {
         _ = try await command("set_pool_heater", session: session, screenKey: nil)
     }
 
+    /// The filter pump. A Jandy heater will not fire without circulation, so enabling heat
+    /// while the pump is off achieves nothing.
+    func togglePoolPump(session: Session) async throws {
+        _ = try await command("set_pool_pump", session: session, screenKey: nil)
+    }
+
     // MARK: - Transport
 
     /// Issues one `session.json` command. When `screenKey` is given, the named screen array
