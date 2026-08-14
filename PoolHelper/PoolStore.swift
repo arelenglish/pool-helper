@@ -25,6 +25,11 @@ final class PoolStore {
     /// True while the light has been asked for but the fixture hasn't reported in yet.
     private(set) var isLightStarting = false
 
+    /// Whether an account is stored on this device. The credentials themselves never leave
+    /// the Keychain — this is only so the setup screen can show that they're there, instead
+    /// of presenting empty fields that read as "your account was lost".
+    private(set) var isSignedIn = false
+
     /// The temperature the guest has dialed in. Normally mirrors the controller's setpoint,
     /// but runs ahead of it while an adjustment is still being debounced.
     private(set) var targetTemperature: Int = PoolState.placeholder.poolSetPoint
@@ -79,6 +84,7 @@ final class PoolStore {
         self.credentials = credentials
         self.pollInterval = pollInterval
         self.setPointDebounce = setPointDebounce
+        self.isSignedIn = credentials.load() != nil
         self.heatDeadline = schedule.deadline
         self.jetsDeadline = jetsSchedule.deadline
         self.lightsDeadline = lightsSchedule.deadline
@@ -441,11 +447,13 @@ final class PoolStore {
         let session = try await client.login(email: email, password: password)
         try credentials.save(.init(email: email, password: password))
         self.session = session
+        isSignedIn = true
         await refresh()
     }
 
     func signOut() {
         credentials.clear()
+        isSignedIn = false
         schedule.disarm()
         jetsSchedule.disarm()
         lightsSchedule.disarm()
@@ -465,7 +473,10 @@ final class PoolStore {
 
     @discardableResult
     private func signInFromKeychain() async throws -> Session {
-        guard let saved = credentials.load() else { throw PoolError.noCredentials }
+        guard let saved = credentials.load() else {
+            isSignedIn = false
+            throw PoolError.noCredentials
+        }
         let session = try await client.login(email: saved.email, password: saved.password)
         self.session = session
         return session

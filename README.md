@@ -23,6 +23,14 @@ To reach the sign-in screen: **press and hold the top-left corner of the screen 
 seconds.** There is no button, no menu, and no other path to it, so a guest will not find it.
 The same screen signs out and sets the pool's coordinates (see [dawn](#lights-off-at-dawn)).
 
+Once signed in, that screen shows the account as stored — masked fields, whether the pool is
+reachable, and a Sign out button — rather than the empty email and password fields it used to
+show, which read as though the account had been lost. Stored credentials are never read back
+into editable fields; they stay in the Keychain.
+
+Note that **deleting the app deletes its Keychain items**, so a fresh install does need signing
+in again. Rebuilding from Xcode over an existing install does not.
+
 Be aware of what a signed-in device is: iAqualink issues no scoped or per-device tokens, so
 anything logged in can do everything the account can. On a shared iPad that is the main risk,
 and it's why the Keychain item is `ThisDeviceOnly` and nothing in the guest UI mentions the

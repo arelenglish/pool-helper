@@ -55,20 +55,39 @@ struct SetupView: View {
     var body: some View {
         NavigationStack {
             Form {
-                Section("Account") {
-                    TextField("Email", text: $email)
-                        .textContentType(.username)
-                        .keyboardType(.emailAddress)
-                        .textInputAutocapitalization(.never)
-                        .autocorrectionDisabled()
+                Section {
+                    if store.isSignedIn {
+                        // Stored credentials are never read back into editable fields — they
+                        // stay in the Keychain. These rows exist so a signed-in account reads
+                        // as present rather than as blank fields that look like data loss.
+                        LabeledContent("Email") { Text(verbatim: "••••••••••") }
+                        LabeledContent("Password") { Text(verbatim: "••••••••") }
+                        Label(connectionSummary, systemImage: connectionSymbol)
+                            .foregroundStyle(store.connection == .online ? .green : .secondary)
+                        Button("Sign out", role: .destructive) { signOut() }
+                    } else {
+                        TextField("Email", text: $email)
+                            .textContentType(.username)
+                            .keyboardType(.emailAddress)
+                            .textInputAutocapitalization(.never)
+                            .autocorrectionDisabled()
 
-                    SecureField("Password", text: $password)
-                        .textContentType(.password)
+                        SecureField("Password", text: $password)
+                            .textContentType(.password)
 
-                    Button(isWorking ? "Signing in…" : "Sign in") {
-                        Task { await signIn() }
+                        Button(isWorking ? "Signing in…" : "Sign in") {
+                            Task { await signIn() }
+                        }
+                        .disabled(email.isEmpty || password.isEmpty || isWorking)
                     }
-                    .disabled(email.isEmpty || password.isEmpty || isWorking)
+                } header: {
+                    Text("Account")
+                } footer: {
+                    Text(store.isSignedIn
+                         ? "Signed in. The credentials are in this iPad's Keychain and don't "
+                           + "need entering again — including after a restart."
+                         : "Entered once. Stored in this iPad's Keychain, excluded from "
+                           + "backups, and never sent anywhere but iAqualink.")
                 }
 
                 Section {
@@ -126,16 +145,6 @@ struct SetupView: View {
                     Section { Text(errorMessage).foregroundStyle(.red) }
                 }
 
-                Section {
-                    Button("Sign out", role: .destructive) {
-                        store.signOut()
-                        email = ""
-                        password = ""
-                    }
-                } footer: {
-                    Text("Credentials are stored in this iPad's Keychain, are excluded from "
-                         + "backups, and never leave the device.")
-                }
             }
             .navigationTitle("Setup")
             .toolbar {
@@ -151,6 +160,26 @@ struct SetupView: View {
                 savedCoordinate = saved
             }
         }
+    }
+
+    private var connectionSummary: String {
+        switch store.connection {
+        case .online:     return "Connected to the pool"
+        case .connecting: return "Connecting…"
+        case .offline:    return "Signed in — can't reach the pool right now"
+        case .needsSetup: return "Signed in — credentials were rejected"
+        }
+    }
+
+    private var connectionSymbol: String {
+        store.connection == .online ? "checkmark.circle.fill" : "arrow.triangle.2.circlepath"
+    }
+
+    private func signOut() {
+        store.signOut()
+        email = ""
+        password = ""
+        errorMessage = nil
     }
 
     private func signIn() async {

@@ -4,10 +4,14 @@ struct ContentView: View {
     @State private var store: PoolStore
     @State private var showingSetup = false
 
+    /// Development affordance only — see `PoolHelperApp`, which gates it behind `-demo`.
+    private let opensSetupImmediately: Bool
+
     // Built in the body rather than as a default argument: default arguments are evaluated
     // in a nonisolated context, and PoolStore is main-actor bound.
-    init(store: PoolStore? = nil) {
+    init(store: PoolStore? = nil, opensSetupImmediately: Bool = false) {
         _store = State(initialValue: store ?? PoolStore())
+        self.opensSetupImmediately = opensSetupImmediately
     }
 
     var body: some View {
@@ -44,7 +48,7 @@ struct ContentView: View {
         .persistentSystemOverlays(.hidden)
         .task {
             store.start()
-            if store.connection == .needsSetup { showingSetup = true }
+            if opensSetupImmediately || store.connection == .needsSetup { showingSetup = true }
         }
         .onChange(of: store.connection) { _, connection in
             if connection == .needsSetup { showingSetup = true }

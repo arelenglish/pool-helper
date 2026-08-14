@@ -442,6 +442,45 @@ struct PoolStoreTests {
         #expect(client.commandLog.filter { $0 == "login" }.count >= 1)
     }
 
+    @Test("A stored account is reported as signed in from launch")
+    func signedInAtLaunch() {
+        // The setup screen shows blank fields otherwise, which reads as "my account vanished".
+        let (store, _, _) = makeStore()
+        #expect(store.isSignedIn == true)
+    }
+
+    @Test("Signing out clears the stored account")
+    func signOutClearsStoredAccount() async {
+        let (store, _, _) = makeStore()
+        await store.refresh()
+        #expect(store.isSignedIn == true)
+
+        store.signOut()
+
+        #expect(store.isSignedIn == false)
+        #expect(store.connection == .needsSetup)
+    }
+
+    @Test("Signing in stores the account and reports it")
+    func signInStoresAccount() async throws {
+        let client = MockIAqualinkClient()
+        let defaults = UserDefaults(suiteName: "signin-\(UUID().uuidString)")!
+        let store = PoolStore(
+            client: client,
+            schedule: .heater(defaults: defaults),
+            jetsSchedule: .jets(defaults: defaults),
+            lightsSchedule: .lights(defaults: defaults),
+            solar: SolarClock(coordinate: nil),
+            credentials: .inMemory(nil),
+            pollInterval: .seconds(60)
+        )
+        #expect(store.isSignedIn == false, "nothing stored yet")
+
+        try await store.signIn(email: "a@b.com", password: "pw")
+
+        #expect(store.isSignedIn == true)
+    }
+
     @Test("Missing credentials route to setup instead of an error")
     func needsSetup() async {
         let client = MockIAqualinkClient()

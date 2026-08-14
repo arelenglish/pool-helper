@@ -97,7 +97,9 @@ nonisolated struct SolarClock: Equatable {
     }
 }
 
-private extension Double {
+// `nonisolated` because the project defaults to main-actor isolation, and `SolarClock` — which
+// is pure arithmetic — is not. Without it every use from that struct warns.
+nonisolated private extension Double {
     var radians: Double { self * .pi / 180 }
     var degrees: Double { self * 180 / .pi }
 }
