@@ -99,21 +99,24 @@ and the layout degrades on purpose instead of breaking:
 The breakpoints are in [`CardLayout.swift`](PoolHelper/Views/CardLayout.swift) and are unit
 tested against real iPad widths.
 
-## Still to confirm on-site
+## Confirmed against the hardware
 
-**The light color names.** `aux_1` reports `subtype: 4`. Community references usually map
-subtype 4 to Pentair IntelliBrite, but this fixture was identified as a Jandy Color LED, so
-the Jandy 14-color table ships. Tap through a few colors and check the names match the water.
-If they don't, replace the table in
-[`LightColor.swift`](PoolHelper/Model/LightColor.swift) — the indices are what the API
-consumes, and nothing else depends on the names.
+Everything below was checked on the physical system rather than inferred from community
+documentation, because in two cases the documentation turned out to be wrong.
 
-### Resolved: the setpoint parameter
+### The light color table
 
-**Confirmed 2026-08-13.** `set_temps` carries `temp1` and
-`temp2`, which are two presets for the same body of water — and the controller does not allow
-them to hold the same value. Confirmed live by sending `temp1` alone: `spa_set_point` moved
-104 → 95 while `pool_set_point` stayed at 104.
+`aux_1` reports `subtype: 4`. Community references generally map subtype 4 to Pentair
+IntelliBrite and subtype 1 to Jandy Color LED — but this fixture is a **Jandy Color LED**, and
+the Jandy 14-color table was confirmed correct by tapping through the colors and watching the
+water. So `subtype` alone is not a reliable way to identify the lamp. If you're adapting this,
+check yours rather than trusting the number.
+
+### The setpoint parameter
+
+`set_temps` carries `temp1` and `temp2`, which are two presets for the same body of water —
+and the controller does not allow them to hold the same value. Confirmed live by sending
+`temp1` alone: `spa_set_point` moved 104 → 95 while `pool_set_point` stayed at 104.
 
 ```
 temp1 -> spa_set_point   (second preset — leave alone)
@@ -252,10 +255,11 @@ Two things are specific to this installation and will differ on yours:
 - **Which relay is what.** `aux_1` is the light and `aux_4` the jets here; iAqualink names
   these per-installation. Query `get_devices` and read the labels before changing
   [`AuxCircuit`](PoolHelper/Model/PoolState.swift).
-- **The light's colour table.** `aux_1` reports `subtype: 4`. Community references usually map
-  subtype 4 to Pentair IntelliBrite, but this fixture is a Jandy Color LED, so the Jandy table
-  ships. The indices are what the API consumes; the names and swatches in
-  [`LightColor.swift`](PoolHelper/Model/LightColor.swift) are cosmetic and easy to replace.
+- **The light's colour table.** `aux_1` reports `subtype: 4`, which community references map to
+  Pentair IntelliBrite — but the fixture here is a Jandy Color LED, confirmed by eye. Don't
+  trust `subtype` to identify your lamp. The indices are what the API consumes; the names and
+  swatches in [`LightColor.swift`](PoolHelper/Model/LightColor.swift) are cosmetic and easy to
+  replace.
 
 Also worth knowing before you trust it: **writes are toggles, not assignments.** `set_aux_4`
 flips the jets — it cannot be told "off". Every write has to reconcile against current state

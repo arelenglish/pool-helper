@@ -2,13 +2,14 @@ import SwiftUI
 
 /// The color table for the pool light.
 ///
-/// The controller reports `aux_1` as `type: 2, subtype: 4`. Community API references usually
-/// map subtype 4 to Pentair IntelliBrite and subtype 1 to Jandy Color LED, but the owner
-/// identifies this fixture as a **Jandy Color LED**, so that table ships.
+/// The controller reports `aux_1` as `type: 2, subtype: 4`. Community API references generally
+/// map subtype 4 to Pentair IntelliBrite and subtype 1 to Jandy Color LED — but this fixture is
+/// a **Jandy Color LED**, and these names were confirmed on 2026-08-13 by cycling the colors
+/// and watching the water. So `subtype` is not a reliable way to identify the lamp.
 ///
-/// This mapping is the one contested fact in the app. If the on-wall behavior disagrees with
-/// these labels, replace `all` below with the correct table — the indices are what the API
-/// consumes, and nothing else in the codebase depends on the names or swatches.
+/// Adapting this to another pool means checking the fixture rather than trusting the subtype.
+/// Replace `all` below with the right table: the indices are what the API consumes, and
+/// nothing else in the codebase depends on the names or swatches.
 nonisolated struct LightColor: Identifiable, Equatable, Sendable {
     let id: Int          // the index sent as `light=` in set_light
     let name: String
