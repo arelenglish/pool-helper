@@ -120,7 +120,8 @@ nonisolated struct LiveIAqualinkClient: IAqualinkClient {
     }
 
     /// The filter pump. A Jandy heater will not fire without circulation, so enabling heat
-    /// while the pump is off achieves nothing.
+    /// while the pump is off achieves nothing. Verified against the live controller
+    /// on 2026-08-13.
     func togglePoolPump(session: Session) async throws {
         _ = try await command("set_pool_pump", session: session, screenKey: nil)
     }

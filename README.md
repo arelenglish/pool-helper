@@ -101,11 +101,6 @@ tested against real iPad widths.
 
 ## Still to confirm on-site
 
-**`set_pool_pump` is unverified.** The auto-start above uses the standard iAqualink command
-name but has never been exercised against this controller — confirming it would mean cycling a
-running filter pump, which isn't worth the wear. Check it the first time heat is requested
-while the pump is off, which is the case the feature exists for.
-
 **The light color names.** `aux_1` reports `subtype: 4`. Community references usually map
 subtype 4 to Pentair IntelliBrite, but this fixture was identified as a Jandy Color LED, so
 the Jandy 14-color table ships. Tap through a few colors and check the names match the water.
